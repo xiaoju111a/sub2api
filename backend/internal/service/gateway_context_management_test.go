@@ -471,10 +471,7 @@ func TestBuildUpstreamRequest_OAuthMimicHaiku_PreservesContextManagementEndToEnd
 
 	require.True(t, gjson.GetBytes(outBody, "context_management").Exists(),
 		"OAuth mimic + Haiku 端到端：outgoing body 必须保留 context_management")
-	require.True(t, anthropicBetaTokensContains(outBeta, claude.BetaContextManagement),
-		"对称约束：outgoing anthropic-beta header 必须包含 context-management beta")
-	require.True(t, anthropicBetaTokensContains(outBeta, claude.BetaClaudeCode),
-		"Haiku mimic 必须携带 claude-code beta")
+	require.Empty(t, outBeta, "minimal OAuth forwarding should not add beta headers")
 }
 
 func TestBuildUpstreamRequest_APIKeyHaiku_RemainsUnmimicked(t *testing.T) {
@@ -529,8 +526,7 @@ func TestBuildUpstreamRequest_OAuthMimicNonHaiku_PreservesContextManagementEndTo
 
 	require.True(t, gjson.GetBytes(outBody, "context_management").Exists(),
 		"OAuth mimic + non-haiku：outgoing body 必须保留 context_management。")
-	require.True(t, anthropicBetaTokensContains(outBeta, claude.BetaContextManagement),
-		"对称约束：outgoing anthropic-beta header 同时含 context-management beta")
+	require.Empty(t, outBeta, "minimal OAuth forwarding should not add beta headers")
 }
 
 func TestBuildUpstreamRequest_OAuthTransparentHaikuWithRealCCBeta_PreservesField(t *testing.T) {
@@ -558,8 +554,7 @@ func TestBuildUpstreamRequest_OAuthTransparentHaikuWithRealCCBeta_PreservesField
 	outBody := readUpstreamBodyForTest(t, req)
 	outBeta := getHeaderRaw(req.Header, "anthropic-beta")
 
-	require.True(t, anthropicBetaTokensContains(outBeta, claude.BetaContextManagement),
-		"真 CC 透传路径：客户端 header 中的 context-management beta 必须保留")
+	require.Empty(t, outBeta, "minimal OAuth forwarding should not pass client beta headers")
 	require.True(t, gjson.GetBytes(outBody, "context_management").Exists(),
 		"回归保护：真 CC + haiku + 客户端带 beta token 时，clear_thinking_20251015 功能不能静默失效")
 }
@@ -588,12 +583,9 @@ func TestBuildCountTokensRequest_OAuthMimicHaiku_PreservesContextManagementEndTo
 	outBody := readUpstreamBodyForTest(t, req)
 	outBeta := getHeaderRaw(req.Header, "anthropic-beta")
 
-	require.True(t, anthropicBetaTokensContains(outBeta, claude.BetaContextManagement),
-		"count_tokens mimic 始终注入 context-management beta")
+	require.Empty(t, outBeta, "minimal OAuth count_tokens should not add beta headers")
 	require.True(t, gjson.GetBytes(outBody, "context_management").Exists(),
 		"对称约束：final beta 含 token 时 body 字段保留")
-	require.True(t, anthropicBetaTokensContains(outBeta, claude.BetaTokenCounting),
-		"count_tokens 路径必须含 token-counting beta")
 }
 
 func TestBuildCountTokensRequest_OAuthMimic_DropsInjectedMaxTokens(t *testing.T) {

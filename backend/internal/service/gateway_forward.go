@@ -192,9 +192,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		// Parrot 的 transform_request 从不检查客户端 system 内容，直接覆盖。
 		systemRewritten := false
 		systemRaw, _ := parsed.SystemValue()
-		systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
+		systemPromptInjectionEnabled, _, _ := s.claudeOAuthSystemPromptInjectionSettings(ctx)
 		if systemPromptInjectionEnabled {
-			if err := replaceBody(rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks)); err != nil {
+			if err := replaceBody(rewriteSystemForNonClaudeCode(body, systemRaw)); err != nil {
 				return nil, err
 			}
 			systemRewritten = true
@@ -241,6 +241,10 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			if err := replaceBody(applyToolsLastCacheBreakpoint(body)); err != nil {
 				return nil, err
 			}
+		}
+
+		if err := replaceBody(keepClaudeOAuthMinimalRequestBody(body)); err != nil {
+			return nil, err
 		}
 	}
 

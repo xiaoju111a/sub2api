@@ -388,10 +388,10 @@ func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 		return body
 	}
 
-	systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
+	systemPromptInjectionEnabled, _, _ := s.claudeOAuthSystemPromptInjectionSettings(ctx)
 	systemRewritten := false
 	if systemPromptInjectionEnabled {
-		body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, normalizeSystemParam(systemRaw), systemPrompt, systemPromptBlocks)
+		body = rewriteSystemForNonClaudeCode(body, normalizeSystemParam(systemRaw))
 		systemRewritten = true
 	}
 
@@ -429,6 +429,8 @@ func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 	} else {
 		body = applyToolsLastCacheBreakpoint(body)
 	}
+
+	body = keepClaudeOAuthMinimalRequestBody(body)
 
 	return body
 }
@@ -674,17 +676,63 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 	return result
 }
 
-// rewriteSystemForNonClaudeCode 将非 Claude Code 客户端的 system prompt 迁移至 messages，
-// system 字段仅保留 Claude Code 标识提示词。
-// Anthropic 基于 system 参数内容检测第三方应用，仅前置追加 Claude Code 提示词
-// 无法通过检测，因为后续内容仍为非 Claude Code 格式。
-// 策略：将原始 system prompt 提取并注入为 user/assistant 消息对，system 仅保留 Claude Code 标识。
+// rewriteSystemForNonClaudeCode keeps only the billing attribution block for
+// the local minimal OAuth compatibility path.
 func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
-	return rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, "", "")
+	// OAuth forwarding intentionally keeps only the billing attribution block.
+	// Client system instructions are not migrated into messages and the Claude
+	// Code identity/expansion prompts are not added in this compatibility mode.
+	_ = system
+	billingBlock, err := buildBillingAttributionBlockJSON(body, claude.CLICurrentVersion)
+	if err != nil {
+		logger.LegacyPrintf("service.gateway", "Warning: failed to build billing system block: %v", err)
+		return body
+	}
+	out, ok := setJSONRawBytes(body, "system", buildJSONArrayRaw([][]byte{billingBlock}))
+	if !ok {
+		logger.LegacyPrintf("service.gateway", "Warning: failed to set Claude billing system block")
+		return body
+	}
+	return out
 }
 
 func rewriteSystemForNonClaudeCodeWithPrompt(body []byte, system any, expansionPrompt string) []byte {
 	return rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, expansionPrompt, "")
+}
+
+func keepClaudeOAuthMinimalRequestBody(body []byte) []byte {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+
+	allowedOrder := []string{"model", "max_tokens", "stream", "system", "messages"}
+	parts := make([][]byte, 0, len(allowedOrder))
+	for _, key := range allowedOrder {
+		raw, ok := obj[key]
+		if !ok {
+			continue
+		}
+		encodedKey, err := json.Marshal(key)
+		if err != nil {
+			continue
+		}
+		part := make([]byte, 0, len(encodedKey)+1+len(raw))
+		part = append(part, encodedKey...)
+		part = append(part, ':')
+		part = append(part, raw...)
+		parts = append(parts, part)
+	}
+
+	out := []byte{'{'}
+	for i, part := range parts {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, part...)
+	}
+	out = append(out, '}')
+	return stripAllCacheControlBlocks(out)
 }
 
 type claudeOAuthSystemPromptBlockConfig struct {
@@ -1031,6 +1079,28 @@ func collectCacheControlPaths(body []byte) (invalidThinking []cacheControlPath, 
 	}
 
 	return invalidThinking, messagePaths, toolPaths, systemPaths
+}
+
+func stripAllCacheControlBlocks(body []byte) []byte {
+	invalidThinking, messagePaths, toolPaths, systemPaths := collectCacheControlPaths(body)
+	paths := make([]string, 0, len(invalidThinking)+len(messagePaths)+len(toolPaths)+len(systemPaths))
+	for _, item := range invalidThinking {
+		paths = append(paths, item.path)
+	}
+	paths = append(paths, messagePaths...)
+	paths = append(paths, toolPaths...)
+	paths = append(paths, systemPaths...)
+
+	out := body
+	for _, path := range paths {
+		if !gjson.GetBytes(out, path).Exists() {
+			continue
+		}
+		if next, ok := deleteJSONPathBytes(out, path); ok {
+			out = next
+		}
+	}
+	return out
 }
 
 // enforceCacheControlLimit 强制执行 cache_control 块数量限制（最多 4 个）

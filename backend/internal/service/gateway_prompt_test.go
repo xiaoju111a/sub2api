@@ -330,11 +330,11 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			wantMessagesLen: 1,
 		},
 		{
-			name:             "custom string system - migrated to messages",
+			name:             "custom string system - not migrated to messages",
 			body:             `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
 			system:           "You are a personal assistant running inside OpenClaw.",
 			wantSystemText:   claudeCodeSystemPrompt,
-			wantMessagesLen:  3, // instruction + ack + original
+			wantMessagesLen:  1,
 			wantFirstMsgRole: "user",
 			wantFirstMsgText: "[System Instructions]\nYou are a personal assistant running inside OpenClaw.",
 			wantAckMsgText:   "Understood. I will follow these instructions.",
@@ -347,14 +347,14 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			wantMessagesLen: 1,
 		},
 		{
-			name: "array system with custom blocks - text joined and migrated",
+			name: "array system with custom blocks - not migrated",
 			body: `{"model":"claude-3","messages":[{"role":"user","content":"hello"}]}`,
 			system: []any{
 				map[string]any{"type": "text", "text": "First instruction"},
 				map[string]any{"type": "text", "text": "Second instruction"},
 			},
 			wantSystemText:   claudeCodeSystemPrompt,
-			wantMessagesLen:  3,
+			wantMessagesLen:  1,
 			wantFirstMsgRole: "user",
 			wantFirstMsgText: "[System Instructions]\nFirst instruction\n\nSecond instruction",
 			wantAckMsgText:   "Understood. I will follow these instructions.",
@@ -371,7 +371,7 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			body:             `{"model":"claude-3","system":"Custom prompt","messages":[{"role":"user","content":"hello"}]}`,
 			system:           json.RawMessage(`"Custom prompt"`),
 			wantSystemText:   claudeCodeSystemPrompt,
-			wantMessagesLen:  3,
+			wantMessagesLen:  1,
 			wantFirstMsgRole: "user",
 			wantFirstMsgText: "[System Instructions]\nCustom prompt",
 			wantAckMsgText:   "Understood. I will follow these instructions.",
@@ -388,7 +388,7 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			body:             `{"model":"claude-3","messages":[{"role":"user","content":"msg1"},{"role":"assistant","content":"resp1"},{"role":"user","content":"msg2"}]}`,
 			system:           "Be helpful",
 			wantSystemText:   claudeCodeSystemPrompt,
-			wantMessagesLen:  5, // 2 injected + 3 original
+			wantMessagesLen:  3,
 			wantFirstMsgRole: "user",
 			wantFirstMsgText: "[System Instructions]\nBe helpful",
 			wantAckMsgText:   "Understood. I will follow these instructions.",
@@ -403,13 +403,9 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			err := json.Unmarshal(result, &parsed)
 			require.NoError(t, err)
 
-			// system 应为 array 格式，对齐真实 Claude Code CLI 的 3-block 形态：
-			//   [0] billing attribution block (x-anthropic-billing-header: cc_version=...;)
-			//   [1] Claude Code 身份前缀 block (不带 cache_control)
-			//   [2] 工具无关的通用提示词扩充 block (带 cache_control，作为缓存断点)
 			systemArr, ok := parsed["system"].([]any)
 			require.True(t, ok, "system should be an array, got %T", parsed["system"])
-			require.Len(t, systemArr, 3, "system array should have exactly 3 blocks (billing + cc prompt + expansion)")
+			require.Len(t, systemArr, 1, "system array should contain only the billing block")
 
 			billingBlock, ok := systemArr[0].(map[string]any)
 			require.True(t, ok)
@@ -420,53 +416,47 @@ func TestRewriteSystemForNonClaudeCode(t *testing.T) {
 			// 新版 CLI 已取消 cch=... 签名字段，注入的 billing block 不应再带 cch。
 			require.NotContains(t, billingBlock["text"], "cch=")
 
-			systemBlock, ok := systemArr[1].(map[string]any)
-			require.True(t, ok)
-			require.Equal(t, "text", systemBlock["type"])
-			require.Equal(t, tt.wantSystemText, systemBlock["text"])
-			_, hasCC := systemBlock["cache_control"]
-			require.False(t, hasCC, "身份前缀 block 不应带 cache_control（断点落在扩充块）")
-
-			expansionBlock, ok := systemArr[2].(map[string]any)
-			require.True(t, ok)
-			require.Equal(t, "text", expansionBlock["type"])
-			require.Equal(t, claudeCodeSystemPromptExpansion, expansionBlock["text"])
-			cc, ok := expansionBlock["cache_control"].(map[string]any)
-			require.True(t, ok, "expansion block should have cache_control")
-			require.Equal(t, "ephemeral", cc["type"])
+			require.NotContains(t, billingBlock["text"], claudeCodeSystemPrompt)
 
 			// 检查 messages
 			messages, ok := parsed["messages"].([]any)
 			require.True(t, ok, "messages should be an array")
 			require.Len(t, messages, tt.wantMessagesLen)
 
-			if tt.wantFirstMsgRole != "" && len(messages) >= 2 {
-				// 检查注入的 instruction 消息
-				firstMsg, ok := messages[0].(map[string]any)
-				require.True(t, ok)
-				require.Equal(t, tt.wantFirstMsgRole, firstMsg["role"])
-
-				firstContent, ok := firstMsg["content"].([]any)
-				require.True(t, ok)
-				require.Len(t, firstContent, 1)
-				firstBlock, ok := firstContent[0].(map[string]any)
-				require.True(t, ok)
-				require.Equal(t, tt.wantFirstMsgText, firstBlock["text"])
-
-				// 检查注入的 ack 消息
-				ackMsg, ok := messages[1].(map[string]any)
-				require.True(t, ok)
-				require.Equal(t, "assistant", ackMsg["role"])
-
-				ackContent, ok := ackMsg["content"].([]any)
-				require.True(t, ok)
-				require.Len(t, ackContent, 1)
-				ackBlock, ok := ackContent[0].(map[string]any)
-				require.True(t, ok)
-				require.Equal(t, tt.wantAckMsgText, ackBlock["text"])
-			}
 		})
 	}
+}
+
+func TestKeepClaudeOAuthMinimalRequestBody(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-3",
+		"max_tokens":64,
+		"stream":false,
+		"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=1.2; cc_entrypoint=cli;","cache_control":{"type":"ephemeral"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}],
+		"tools":[{"name":"lookup","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"lookup"},
+		"metadata":{"user_id":"abc"},
+		"thinking":{"type":"enabled","budget_tokens":1024},
+		"context_management":{"edits":[]},
+		"service_tier":"standard"
+	}`)
+
+	result := keepClaudeOAuthMinimalRequestBody(body)
+
+	require.True(t, gjson.ValidBytes(result))
+	require.Equal(t, "claude-3", gjson.GetBytes(result, "model").String())
+	require.Equal(t, int64(64), gjson.GetBytes(result, "max_tokens").Int())
+	require.True(t, gjson.GetBytes(result, "system").Exists())
+	require.True(t, gjson.GetBytes(result, "messages").Exists())
+	require.False(t, gjson.GetBytes(result, "tools").Exists())
+	require.False(t, gjson.GetBytes(result, "tool_choice").Exists())
+	require.False(t, gjson.GetBytes(result, "metadata").Exists())
+	require.False(t, gjson.GetBytes(result, "thinking").Exists())
+	require.False(t, gjson.GetBytes(result, "context_management").Exists())
+	require.False(t, gjson.GetBytes(result, "service_tier").Exists())
+	require.False(t, gjson.GetBytes(result, "system.0.cache_control").Exists())
+	require.False(t, gjson.GetBytes(result, "messages.0.content.0.cache_control").Exists())
 }
 
 func TestRewriteSystemForNonClaudeCodeWithPrompt_UsesCustomExpansionPrompt(t *testing.T) {
@@ -492,7 +482,7 @@ func TestRewriteSystemForNonClaudeCode_PreservesSystemCacheControlOnMigratedMess
 		},
 	}
 
-	result := rewriteSystemForNonClaudeCode(body, system)
+	result := rewriteSystemForNonClaudeCodeWithPrompt(body, system, "")
 
 	require.Equal(t, "[System Instructions]\nStable project instructions", gjson.GetBytes(result, "messages.0.content.0.text").String())
 	require.Equal(t, "ephemeral", gjson.GetBytes(result, "messages.0.content.0.cache_control.type").String())
@@ -505,7 +495,7 @@ func TestRewriteSystemForNonClaudeCode_LeavesMigratedMessageUncachedWithoutSyste
 		map[string]any{"type": "text", "text": "Project instructions"},
 	}
 
-	result := rewriteSystemForNonClaudeCode(body, system)
+	result := rewriteSystemForNonClaudeCodeWithPrompt(body, system, "")
 
 	require.False(t, gjson.GetBytes(result, "messages.0.content.0.cache_control").Exists())
 }

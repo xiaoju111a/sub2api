@@ -78,6 +78,10 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 				return err
 			}
 		}
+
+		if err := replaceBody(keepClaudeOAuthMinimalRequestBody(body)); err != nil {
+			return err
+		}
 	}
 
 	// Antigravity 账户不支持 count_tokens，返回 404 让客户端 fallback 到本地估算。
@@ -495,10 +499,15 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	if beta, ok := account.HeaderOverrideValue("anthropic-beta"); ok {
 		finalBetaHeader, finalBetaShouldSet = beta, true
 	}
+	if tokenType == "oauth" {
+		finalBetaHeader, finalBetaShouldSet = "", false
+	}
 
 	// 能力维度 body sanitize：与最终 anthropic-beta header 对称
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
-		body = sanitized
+	if tokenType != "oauth" {
+		if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
+			body = sanitized
+		}
 	}
 
 	body = sanitizeCountTokensRequestBody(body)
@@ -515,38 +524,31 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		setAnthropicAPIKeyAuthHeader(req.Header, account, token)
 	}
 
-	// 白名单透传 headers（恢复真实 wire casing）
-	for key, values := range clientHeaders {
-		lowerKey := strings.ToLower(key)
-		if allowedHeaders[lowerKey] {
-			wireKey := resolveWireCasing(key)
-			for _, v := range values {
-				addHeaderRaw(req.Header, wireKey, v)
+	// OAuth requests use only authorization and anthropic-version.
+	if tokenType != "oauth" {
+		for key, values := range clientHeaders {
+			lowerKey := strings.ToLower(key)
+			if allowedHeaders[lowerKey] {
+				wireKey := resolveWireCasing(key)
+				for _, v := range values {
+					addHeaderRaw(req.Header, wireKey, v)
+				}
 			}
 		}
 	}
 
-	// OAuth 账号：应用指纹到请求头（受设置开关控制）
-	if ctEnableFP && ctFingerprint != nil {
+	// Fingerprint headers are not part of the minimal OAuth request.
+	if tokenType != "oauth" && ctEnableFP && ctFingerprint != nil {
 		s.identityService.ApplyFingerprint(req, ctFingerprint)
 	}
 
 	// 确保必要的 headers 存在（保持原始大小写）
-	if getHeaderRaw(req.Header, "content-type") == "" {
+	if tokenType != "oauth" && getHeaderRaw(req.Header, "content-type") == "" {
 		setHeaderRaw(req.Header, "content-type", "application/json")
 	}
 	if getHeaderRaw(req.Header, "anthropic-version") == "" {
 		setHeaderRaw(req.Header, "anthropic-version", "2023-06-01")
 	}
-	if tokenType == "oauth" {
-		applyClaudeOAuthHeaderDefaults(req)
-	}
-
-	// OAuth + mimic Claude Code：强制注入 CLI 指纹 header
-	if tokenType == "oauth" && mimicClaudeCode {
-		applyClaudeCodeMimicHeaders(req, false)
-	}
-
 	// 写入最终 anthropic-beta header（Del 一次避免白名单透传值残留）
 	deleteHeaderAllForms(req.Header, "anthropic-beta")
 	if finalBetaShouldSet {
@@ -554,7 +556,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 
 	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
-	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
+	if tokenType != "oauth" && getHeaderRaw(req.Header, "X-Claude-Code-Session-Id") != "" {
 		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
 			if parsed := ParseMetadataUserID(uid); parsed != nil {
 				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
