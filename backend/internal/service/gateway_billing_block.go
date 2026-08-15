@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	"github.com/tidwall/gjson"
@@ -92,4 +93,15 @@ func buildBillingAttributionText(body []byte, cliVersion string) (string, error)
 		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=cli;",
 		cliVersion, fp,
 	), nil
+}
+
+func buildBillingAttributionBlockJSON(body []byte, cliVersion string) ([]byte, error) {
+	text, err := buildBillingAttributionText(body, cliVersion)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]string{
+		"type": "text",
+		"text": text,
+	})
 }
