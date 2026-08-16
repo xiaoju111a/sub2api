@@ -324,6 +324,31 @@ func TestForwardGrokVideoStatusRewritesOnlyProtectedContentURL(t *testing.T) {
 	require.NotContains(t, recorder.Body.String(), "malicious.invalid")
 }
 
+func TestForwardGrokVideoStatusPreservesOfficialSignedURL(t *testing.T) {
+	statusBody := `{"status":"done","video":{"url":"https://vidgen.x.ai/signed-token/xai-video-task-1.mp4","duration":5}}`
+	upstream := &grokMediaContentUpstreamStub{
+		response: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(statusBody)),
+		},
+	}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	c, recorder := grokMediaContentTestContext(http.MethodGet, "https://api.example/v1/videos/task-1", nil)
+
+	_, err := svc.ForwardGrokMedia(
+		context.Background(), c, grokMediaContentTestAccount(),
+		GrokMediaEndpointVideoStatus, "task-1", nil, "",
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t,
+		"https://vidgen.x.ai/signed-token/xai-video-task-1.mp4",
+		gjson.Get(recorder.Body.String(), "video.url").String(),
+	)
+}
+
 func TestRewriteGrokMediaVideoContentURLsPreservesOtherIDsAndHandlesNestedEscapedID(t *testing.T) {
 	body := []byte(`{"nested":[{"url":"https://relay.example/v1/videos/task%2Fone/content"},{"url":"https://relay.example/v1/videos/task-two/content"}]}`)
 

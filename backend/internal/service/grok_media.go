@@ -711,11 +711,15 @@ func (s *OpenAIGatewayService) ForwardGrokMedia(
 		}
 	}
 	if endpoint == GrokMediaEndpointVideoStatus {
-		respBody = rewriteGrokMediaVideoContentURLs(
-			respBody,
-			requestID,
-			grokMediaContentProxyURL(c, requestID),
-		)
+		// Preserve xAI's complete, unauthenticated signed URL. Only relay-style
+		// protected content paths need to be rewritten through this gateway.
+		if signedURL, signedErr := grokMediaSignedVideoContentURL(respBody, requestID); signedErr != nil || signedURL == "" {
+			respBody = rewriteGrokMediaVideoContentURLs(
+				respBody,
+				requestID,
+				grokMediaContentProxyURL(c, requestID),
+			)
+		}
 	}
 	writeGrokMediaResponse(c, resp, respBody, s.responseHeaderFilter)
 	usage := grokMediaUsageFromResponse(endpoint, requestInfo, respBody)
